@@ -1152,7 +1152,65 @@ struct KVCacheError: Error {
     let message: String
 }
 
+public struct PromptCacheSnapshot {
+    public let prefixTokenCount: Int
+    public let cacheClasses: [String]
+    public let cacheMetaState: [[String]]
+    public let cacheState: [[MLXArray]]
+    public let metadata: [String: String]
+
+    public init(
+        prefixTokenCount: Int,
+        cacheClasses: [String],
+        cacheMetaState: [[String]],
+        cacheState: [[MLXArray]],
+        metadata: [String: String]
+    ) {
+        self.prefixTokenCount = prefixTokenCount
+        self.cacheClasses = cacheClasses
+        self.cacheMetaState = cacheMetaState
+        self.cacheState = cacheState
+        self.metadata = metadata
+    }
+}
+
+private struct PromptCacheStorage {
+    let cacheData: [[MLXArray]]
+    let cacheInfo: [[String]]
+    let cacheClasses: [String]
+    let userMetadata: [String: String]
+}
+
 // MARK: - Utility Functions
+
+public func capturePromptCache(
+    cache: [KVCache],
+    prefixTokenCount: Int,
+    metadata: [String: String] = [:]
+) throws -> PromptCacheSnapshot {
+    let storage = promptCacheStorage(from: cache, metadata: metadata)
+    let copiedData = try deepCopyPromptCacheArrays(storage.cacheData)
+    return PromptCacheSnapshot(
+        prefixTokenCount: prefixTokenCount,
+        cacheClasses: storage.cacheClasses,
+        cacheMetaState: storage.cacheInfo,
+        cacheState: copiedData,
+        metadata: storage.userMetadata
+    )
+}
+
+public func materializePromptCache(
+    from snapshot: PromptCacheSnapshot
+) throws -> [KVCache] {
+    let copiedData = try deepCopyPromptCacheArrays(snapshot.cacheState)
+    let storage = PromptCacheStorage(
+        cacheData: copiedData,
+        cacheInfo: snapshot.cacheMetaState,
+        cacheClasses: snapshot.cacheClasses,
+        userMetadata: snapshot.metadata
+    )
+    return try reconstructPromptCaches(from: storage)
+}
 
 /// Save a pre-computed prompt cache to a file.
 ///
@@ -1165,59 +1223,9 @@ public func savePromptCache(
     cache: [KVCache],
     metadata: [String: String] = [:]
 ) throws {
-    let cacheData = cache.map { $0.state }
-    let cacheInfo = cache.map { $0.metaState }
-    // Use Python-compatible class names for cross-platform compatibility
-    let cacheClasses = cache.map { cache -> String in
-        switch cache {
-        case is ChunkedKVCache:
-            return "ChunkedKVCache"  // Must precede KVCacheSimple because of inheritance
-        case is KVCacheSimple:
-            return "KVCache"  // Python uses "KVCache" for the basic cache
-        case is RotatingKVCache:
-            return "RotatingKVCache"
-        case is QuantizedKVCache:
-            return "QuantizedKVCache"
-        case is MambaCache:
-            return "MambaCache"  // Must precede ArraysCache because of inheritance
-        case is ArraysCache:
-            return "ArraysCache"
-        case is CacheList:
-            return "CacheList"
-        default:
-            return "KVCache"  // Default fallback
-        }
-    }
-
-    // Flatten cache data using tree_flatten compatible structure: "i.j" format
-    var flattenedData: [String: MLXArray] = [:]
-    for (i, arrays) in cacheData.enumerated() {
-        for (j, array) in arrays.enumerated() {
-            flattenedData["\(i).\(j)"] = array
-        }
-    }
-
-    // Create cache_metadata structure compatible with Python: [cache_info, metadata, cache_classes]
-    var flattenedMetadata: [String: String] = [:]
-
-    // Flatten cache_info as "0.i.j" (first element of cache_metadata)
-    for (i, info) in cacheInfo.enumerated() {
-        for (j, metaValue) in info.enumerated() {
-            flattenedMetadata["0.\(i).\(j)"] = metaValue
-        }
-    }
-
-    // Flatten user metadata as "1.key" (second element of cache_metadata)
-    for (key, value) in metadata {
-        flattenedMetadata["1.\(key)"] = value
-    }
-
-    // Flatten cache_classes as "2.i" (third element of cache_metadata)
-    for (i, className) in cacheClasses.enumerated() {
-        flattenedMetadata["2.\(i)"] = className
-    }
-
-    try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
+    let storage = promptCacheStorage(from: cache, metadata: metadata)
+    let flattened = flattenPromptCacheStorage(storage)
+    try save(arrays: flattened.arrays, metadata: flattened.metadata, url: url)
 }
 
 /// Load a prompt cache from a file.
@@ -1229,81 +1237,9 @@ public func loadPromptCache(
     url: URL
 ) throws -> ([KVCache], [String: String]) {
     let (arrays, metadata) = try loadArraysAndMetadata(url: url)
-
-    // Unflatten arrays using tree_unflatten compatible logic
-    let cacheData = unflattenArrays(arrays)
-
-    // Unflatten metadata using tree_unflatten compatible logic
-    let unflattenedMetadata = unflattenMetadata(metadata)
-
-    // Extract cache_info, user_metadata, and cache_classes from unflattened structure
-    // Structure: [cache_info, user_metadata, cache_classes]
-    guard unflattenedMetadata.count >= 3 else {
-        throw KVCacheError(message: "Invalid cache metadata format")
-    }
-
-    let cacheInfo = unflattenedMetadata[0] as? [[String]] ?? []
-    let userMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
-    let cacheClasses = unflattenedMetadata[2] as? [String] ?? []
-
-    guard cacheData.count == cacheInfo.count && cacheData.count == cacheClasses.count else {
-        throw KVCacheError(message: "Mismatch in cache counts")
-    }
-
-    // Reconstruct cache instances
-    var caches: [KVCache] = []
-    for i in 0 ..< cacheData.count {
-        let className = cacheClasses[i]
-
-        var cache: KVCache
-        switch className {
-        case "KVCache", "KVCacheSimple":  // Handle both Python and Swift names
-            cache = KVCacheSimple()
-        case "RotatingKVCache":
-            // Parse metaState first to get maxSize, then create cache
-            let info = i < cacheInfo.count ? cacheInfo[i] : []
-            guard info.count >= 5 else {
-                throw KVCacheError(message: "Invalid RotatingKVCache metaState - expected 5 values")
-            }
-            if info[1] == "None" {
-                throw KVCacheError(
-                    message:
-                        "RotatingKVCache with maxSize=None is not supported. This cache was created with invalid parameters."
-                )
-            }
-            guard let maxSize = Int(info[1]) else {
-                throw KVCacheError(
-                    message: "Failed to parse RotatingKVCache maxSize from: \(info[1])")
-            }
-            cache = RotatingKVCache(maxSize: maxSize)  // Create with parsed maxSize
-        case "QuantizedKVCache":
-            cache = QuantizedKVCache()
-        case "ChunkedKVCache":
-            cache = ChunkedKVCache()
-        case "MambaCache":
-            cache = MambaCache()
-        case "ArraysCache":
-            // Size doesn't matter here as it's only needed to initialize the `cache` container inside
-            // The container will be set as a `state` with correct size before returning a cache
-            cache = ArraysCache(size: 0)
-        case "CacheList":
-            // Note: CacheList requires special handling as it contains sub-caches
-            // For now, create an empty CacheList - this may not work correctly
-            // for complex cache hierarchies loaded from Python
-            cache = CacheList()
-            print("Warning: CacheList loading may not preserve sub-cache structure correctly")
-        default:
-            throw KVCacheError(message: "Unknown cache class: \(className)")
-        }
-
-        cache.state = cacheData[i]
-        if i < cacheInfo.count {
-            cache.metaState = cacheInfo[i]
-        }
-        caches.append(cache)
-    }
-
-    return (caches, userMetadata)
+    let storage = try decodePromptCacheStorage(arrays: arrays, metadata: metadata)
+    let caches = try reconstructPromptCaches(from: storage)
+    return (caches, storage.userMetadata)
 }
 
 /// Unflatten arrays from tree_flatten format (e.g., "0.1", "1.0") to nested structure
@@ -1385,6 +1321,171 @@ private func unflattenMetadata(_ flatMetadata: [String: String]) -> [Any] {
     }
 
     return [cacheInfo, userMetadata, cacheClasses]
+}
+
+private func promptCacheStorage(
+    from cache: [KVCache],
+    metadata: [String: String]
+) -> PromptCacheStorage {
+    PromptCacheStorage(
+        cacheData: cache.map(\.state),
+        cacheInfo: cache.map(\.metaState),
+        cacheClasses: cache.map { promptCacheClassName(for: $0) },
+        userMetadata: metadata
+    )
+}
+
+private func promptCacheClassName(for cache: KVCache) -> String {
+    switch cache {
+    case is ChunkedKVCache:
+        return "ChunkedKVCache"
+    case is KVCacheSimple:
+        return "KVCache"
+    case is RotatingKVCache:
+        return "RotatingKVCache"
+    case is QuantizedKVCache:
+        return "QuantizedKVCache"
+    case is MambaCache:
+        return "MambaCache"
+    case is ArraysCache:
+        return "ArraysCache"
+    case is CacheList:
+        return "CacheList"
+    default:
+        return "KVCache"
+    }
+}
+
+private func flattenPromptCacheStorage(
+    _ storage: PromptCacheStorage
+) -> (arrays: [String: MLXArray], metadata: [String: String]) {
+    var flattenedData: [String: MLXArray] = [:]
+    for (i, arrays) in storage.cacheData.enumerated() {
+        for (j, array) in arrays.enumerated() {
+            flattenedData["\(i).\(j)"] = array
+        }
+    }
+
+    var flattenedMetadata: [String: String] = [:]
+    for (i, info) in storage.cacheInfo.enumerated() {
+        for (j, metaValue) in info.enumerated() {
+            flattenedMetadata["0.\(i).\(j)"] = metaValue
+        }
+    }
+    for (key, value) in storage.userMetadata {
+        flattenedMetadata["1.\(key)"] = value
+    }
+    for (i, className) in storage.cacheClasses.enumerated() {
+        flattenedMetadata["2.\(i)"] = className
+    }
+
+    return (arrays: flattenedData, metadata: flattenedMetadata)
+}
+
+private func decodePromptCacheStorage(
+    arrays: [String: MLXArray],
+    metadata: [String: String]
+) throws -> PromptCacheStorage {
+    let cacheData = unflattenArrays(arrays)
+    let unflattenedMetadata = unflattenMetadata(metadata)
+    guard unflattenedMetadata.count >= 3 else {
+        throw KVCacheError(message: "Invalid cache metadata format")
+    }
+
+    let cacheInfo = unflattenedMetadata[0] as? [[String]] ?? []
+    let userMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
+    let cacheClasses = unflattenedMetadata[2] as? [String] ?? []
+
+    guard cacheData.count == cacheInfo.count && cacheData.count == cacheClasses.count else {
+        throw KVCacheError(message: "Mismatch in cache counts")
+    }
+
+    return PromptCacheStorage(
+        cacheData: cacheData,
+        cacheInfo: cacheInfo,
+        cacheClasses: cacheClasses,
+        userMetadata: userMetadata
+    )
+}
+
+private func reconstructPromptCaches(
+    from storage: PromptCacheStorage
+) throws -> [KVCache] {
+    guard storage.cacheData.count == storage.cacheInfo.count,
+          storage.cacheData.count == storage.cacheClasses.count
+    else {
+        throw KVCacheError(message: "Mismatch in cache counts")
+    }
+
+    var caches: [KVCache] = []
+    for i in 0 ..< storage.cacheData.count {
+        let className = storage.cacheClasses[i]
+        var cache = try makePromptCacheInstance(className: className, metaState: storage.cacheInfo[i])
+        cache.state = storage.cacheData[i]
+        cache.metaState = storage.cacheInfo[i]
+        caches.append(cache)
+    }
+    return caches
+}
+
+private func makePromptCacheInstance(
+    className: String,
+    metaState: [String]
+) throws -> KVCache {
+    switch className {
+    case "KVCache", "KVCacheSimple":
+        return KVCacheSimple()
+    case "RotatingKVCache":
+        guard metaState.count >= 5 else {
+            throw KVCacheError(message: "Invalid RotatingKVCache metaState - expected 5 values")
+        }
+        if metaState[1] == "None" {
+            throw KVCacheError(
+                message:
+                    "RotatingKVCache with maxSize=None is not supported. This cache was created with invalid parameters."
+            )
+        }
+        guard let maxSize = Int(metaState[1]) else {
+            throw KVCacheError(
+                message: "Failed to parse RotatingKVCache maxSize from: \(metaState[1])"
+            )
+        }
+        return RotatingKVCache(maxSize: maxSize)
+    case "QuantizedKVCache":
+        return QuantizedKVCache()
+    case "ChunkedKVCache":
+        return ChunkedKVCache()
+    case "MambaCache":
+        return MambaCache()
+    case "ArraysCache":
+        return ArraysCache(size: 0)
+    case "CacheList":
+        print("Warning: CacheList loading may not preserve sub-cache structure correctly")
+        return CacheList()
+    default:
+        throw KVCacheError(message: "Unknown cache class: \(className)")
+    }
+}
+
+private func deepCopyPromptCacheArrays(
+    _ cacheData: [[MLXArray]]
+) throws -> [[MLXArray]] {
+    guard !cacheData.isEmpty,
+          cacheData.contains(where: { !$0.isEmpty })
+    else {
+        return cacheData
+    }
+
+    var flattenedData: [String: MLXArray] = [:]
+    for (i, arrays) in cacheData.enumerated() {
+        for (j, array) in arrays.enumerated() {
+            flattenedData["\(i).\(j)"] = array
+        }
+    }
+
+    let serialized = try saveToData(arrays: flattenedData)
+    let copiedArrays = try loadArrays(data: serialized)
+    return unflattenArrays(copiedArrays)
 }
 
 /// Construct the model's cache for use when generating.

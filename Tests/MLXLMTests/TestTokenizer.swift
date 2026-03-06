@@ -5,14 +5,23 @@ import MLX
 import MLXLMCommon
 import Tokenizers
 
+final class ChatTemplateCallRecorder {
+    private(set) var addGenerationPromptValues: [Bool] = []
+
+    func record(addGenerationPrompt: Bool) {
+        addGenerationPromptValues.append(addGenerationPrompt)
+    }
+}
+
 /// A test tokenizer -- this can be used in place of a real tokenizer for unit/integration tests.
 struct TestTokenizer: Tokenizer {
 
     let length = 8
 
     var vocabulary: [Int: String]
+    let recorder: ChatTemplateCallRecorder?
 
-    init(vocabularySize: Int = 100) {
+    init(vocabularySize: Int = 100, recorder: ChatTemplateCallRecorder? = nil) {
         let letters = "abcdefghijklmnopqrstuvwxyz"
         self.vocabulary = Dictionary(
             uniqueKeysWithValues: (0 ..< vocabularySize)
@@ -26,6 +35,7 @@ struct TestTokenizer: Tokenizer {
                     )
                 }
         )
+        self.recorder = recorder
     }
 
     func tokenize(text: String) -> [String] {
@@ -104,7 +114,8 @@ struct TestTokenizer: Tokenizer {
         messages: [Tokenizers.Message], chatTemplate: Tokenizers.ChatTemplateArgument?,
         addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?
     ) throws -> [Int] {
-        encode(text: "")
+        recorder?.record(addGenerationPrompt: addGenerationPrompt)
+        return encode(text: "")
     }
 
     func applyChatTemplate(
@@ -112,7 +123,8 @@ struct TestTokenizer: Tokenizer {
         addGenerationPrompt: Bool, truncation: Bool, maxLength: Int?, tools: [Tokenizers.ToolSpec]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        encode(text: "")
+        recorder?.record(addGenerationPrompt: addGenerationPrompt)
+        return encode(text: "")
     }
 
 }
@@ -139,9 +151,22 @@ struct TestInputProcessor: UserInputProcessor {
     }
 
     func prepare(input: UserInput) throws -> LMInput {
+        try prepare(input: input, mode: .generation)
+    }
+
+    func preparePrefix(input: UserInput) throws -> LMInput {
+        try prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(input: UserInput, mode: ChatTemplatePreparationMode) throws -> LMInput {
         let messages = messageGenerator.generate(from: input)
-        let promptTokens = try tokenizer.applyChatTemplate(
-            messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+        let promptTokens = try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            tools: input.tools,
+            additionalContext: input.additionalContext,
+            mode: mode
+        )
 
         return LMInput(tokens: MLXArray(promptTokens))
     }

@@ -926,6 +926,17 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         }
     }
 
+    private func promptTokens(
+        messages: [Message],
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
+        try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            mode: mode
+        )
+    }
+
     private func preprocessImage(
         _ image: CIImage,
         processing: UserInput.Processing?,
@@ -998,12 +1009,23 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .generation)
+    }
+
+    public func preparePrefix(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(
+        input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) async throws -> LMInput {
         // Generate structured messages using the message generator
         let messages = Mistral3MessageGenerator().generate(from: input)
 
         if input.images.isEmpty {
             // No image - just apply chat template
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try promptTokens(messages: messages, mode: mode)
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -1016,7 +1038,7 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         let patchSize = config.imageProcessor.patchSize
 
         // Apply chat template to get tokenized prompt with image placeholder
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        var promptTokens = try promptTokens(messages: messages, mode: mode)
 
         // Decode to find and replace image placeholder token
         let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)

@@ -336,6 +336,45 @@ public struct UserInput {
 /// See also ``ModelContext``.
 public protocol UserInputProcessor: Sendable {
     func prepare(input: UserInput) async throws -> LMInput
+    func preparePrefix(input: UserInput) async throws -> LMInput
+}
+
+extension UserInputProcessor {
+    public func preparePrefix(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input)
+    }
+}
+
+package enum ChatTemplatePreparationMode {
+    case generation
+    case prefixSnapshot
+
+    var addGenerationPrompt: Bool {
+        switch self {
+        case .generation:
+            return true
+        case .prefixSnapshot:
+            return false
+        }
+    }
+}
+
+package func prepareChatTemplateTokens(
+    tokenizer: any Tokenizer,
+    messages: [Message],
+    tools: [ToolSpec]? = nil,
+    additionalContext: [String: any Sendable]? = nil,
+    mode: ChatTemplatePreparationMode
+) throws -> [Int] {
+    try tokenizer.applyChatTemplate(
+        messages: messages,
+        chatTemplate: nil,
+        addGenerationPrompt: mode.addGenerationPrompt,
+        truncation: false,
+        maxLength: nil,
+        tools: tools,
+        additionalContext: additionalContext
+    )
 }
 
 internal enum UserInputError: LocalizedError {

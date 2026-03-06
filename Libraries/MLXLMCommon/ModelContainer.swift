@@ -132,6 +132,16 @@ public final class ModelContainer: Sendable {
         return try await processor.prepare(input: input)
     }
 
+    /// Prepare user input for reusable prefix caching.
+    ///
+    /// Unlike ``prepare(input:)``, this path must not append a generation prompt
+    /// when tokenizing chat messages because the result is intended to be reused
+    /// as a strict prefix of a later full prompt.
+    public func preparePrefix(input: consuming sending UserInput) async throws -> sending LMInput {
+        let processor = await self.processor
+        return try await processor.preparePrefix(input: input)
+    }
+
     /// Generate tokens from prepared input, returning an AsyncStream.
     ///
     /// This method provides a thread-safe way to generate tokens without

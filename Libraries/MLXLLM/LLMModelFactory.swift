@@ -420,7 +420,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 @available(*, deprecated, renamed: "LLMRegistry", message: "Please use LLMRegistry directly.")
 public typealias ModelRegistry = LLMRegistry
 
-private struct LLMUserInputProcessor: UserInputProcessor {
+struct LLMUserInputProcessor: UserInputProcessor {
 
     let tokenizer: Tokenizer
     let configuration: ModelConfiguration
@@ -436,12 +436,26 @@ private struct LLMUserInputProcessor: UserInputProcessor {
     }
 
     func prepare(input: UserInput) throws -> LMInput {
+        try prepare(input: input, mode: .generation)
+    }
+
+    func preparePrefix(input: UserInput) throws -> LMInput {
+        try prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    package func promptTokens(
+        for input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
         let messages = messageGenerator.generate(from: input)
         do {
-            let promptTokens = try tokenizer.applyChatTemplate(
-                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
-
-            return LMInput(tokens: MLXArray(promptTokens))
+            return try prepareChatTemplateTokens(
+                tokenizer: tokenizer,
+                messages: messages,
+                tools: input.tools,
+                additionalContext: input.additionalContext,
+                mode: mode
+            )
         } catch TokenizerError.missingChatTemplate {
             print(
                 "No chat template was included or provided, so converting messages to simple text format. This is not optimal for model performance, so applications should provide a chat template if none is included with the model."
@@ -450,9 +464,15 @@ private struct LLMUserInputProcessor: UserInputProcessor {
                 messages
                 .compactMap { $0["content"] as? String }
                 .joined(separator: "\n\n")
-            let promptTokens = tokenizer.encode(text: prompt)
-            return LMInput(tokens: MLXArray(promptTokens))
+            return tokenizer.encode(text: prompt)
         }
+    }
+
+    private func prepare(
+        input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) throws -> LMInput {
+        LMInput(tokens: MLXArray(try promptTokens(for: input, mode: mode)))
     }
 }
 

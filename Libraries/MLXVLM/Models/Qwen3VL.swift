@@ -26,6 +26,20 @@ public struct Qwen3VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    package func promptTokens(
+        for input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
+        let messages = Qwen3VLMessageGenerator().generate(from: input)
+        return try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            tools: input.tools,
+            additionalContext: input.additionalContext,
+            mode: mode
+        )
+    }
+
     private func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
         image
             .toSRGB()
@@ -72,12 +86,18 @@ public struct Qwen3VLProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen3VLMessageGenerator().generate(from: input)
-        var promptTokens = try tokenizer.applyChatTemplate(
-            messages: messages,
-            tools: input.tools,
-            additionalContext: input.additionalContext
-        )
+        try await prepare(input: input, mode: .generation)
+    }
+
+    public func preparePrefix(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(
+        input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) async throws -> LMInput {
+        var promptTokens = try promptTokens(for: input, mode: mode)
 
         if input.images.isEmpty, input.videos.isEmpty {
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)

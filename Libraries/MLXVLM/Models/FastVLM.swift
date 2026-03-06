@@ -984,12 +984,34 @@ public struct FastVLMProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    private func promptTokens(
+        messages: [Message],
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
+        try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            mode: mode
+        )
+    }
+
     public func prepare(input: MLXLMCommon.UserInput) async throws -> MLXLMCommon.LMInput {
+        try await prepare(input: input, mode: .generation)
+    }
+
+    public func preparePrefix(input: MLXLMCommon.UserInput) async throws -> MLXLMCommon.LMInput {
+        try await prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(
+        input: MLXLMCommon.UserInput,
+        mode: ChatTemplatePreparationMode
+    ) async throws -> MLXLMCommon.LMInput {
         let messages = FastVLMMessageGenerator().generate(from: input)
 
         if input.images.isEmpty {
             // No image scenario
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try promptTokens(messages: messages, mode: mode)
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -1000,7 +1022,7 @@ public struct FastVLMProcessor: UserInputProcessor {
         }
 
         // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
-        let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        let promptTokens = try promptTokens(messages: messages, mode: mode)
         let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
         // Find <image> and replace with token id -200

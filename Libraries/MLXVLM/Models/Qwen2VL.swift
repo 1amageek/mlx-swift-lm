@@ -528,6 +528,18 @@ public struct Qwen2VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    private func promptTokens(
+        for input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
+        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        return try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            mode: mode
+        )
+    }
+
     func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
         image
             .toSRGB()
@@ -560,9 +572,18 @@ public struct Qwen2VLProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = Qwen2VLMessageGenerator().generate(from: input)
+        try await prepare(input: input, mode: .generation)
+    }
 
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+    public func preparePrefix(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(
+        input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) async throws -> LMInput {
+        var promptTokens = try promptTokens(for: input, mode: mode)
 
         // Text-only input
         if input.images.isEmpty, input.videos.isEmpty {

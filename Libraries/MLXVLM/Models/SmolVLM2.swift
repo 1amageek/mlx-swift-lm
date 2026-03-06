@@ -106,6 +106,17 @@ public struct SmolVLMProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    private func promptTokens(
+        messages: [Message],
+        mode: ChatTemplatePreparationMode
+    ) throws -> [Int] {
+        try prepareChatTemplateTokens(
+            tokenizer: tokenizer,
+            messages: messages,
+            mode: mode
+        )
+    }
+
     func getVideoPromptString(
         frameCount: Int, timeStamps: [String], videoDuration: String, seqLen: Int,
         fakeToken: String, imageToken: String, globalImageToken: String
@@ -221,11 +232,22 @@ public struct SmolVLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .generation)
+    }
+
+    public func preparePrefix(input: UserInput) async throws -> LMInput {
+        try await prepare(input: input, mode: .prefixSnapshot)
+    }
+
+    private func prepare(
+        input: UserInput,
+        mode: ChatTemplatePreparationMode
+    ) async throws -> LMInput {
         let messages = Qwen2VLMessageGenerator().generate(from: input)  // TODO: Create SmolVLM2MessageGenerator
 
         if input.images.isEmpty && input.videos.isEmpty {
             // No image scenario
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try promptTokens(messages: messages, mode: mode)
             let tokensArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
             let mask = ones(like: tokensArray)
             return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
@@ -236,7 +258,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
             }
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
-            let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            let promptTokens = try promptTokens(messages: messages, mode: mode)
             let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
             let image = try input.images[0].asCIImage().toSRGB()
@@ -302,8 +324,10 @@ public struct SmolVLMProcessor: UserInputProcessor {
             }
 
             // Unfortunately we don't have a "render" option in Tokenizers yet, so decoding
-            let promptTokens = try tokenizer.applyChatTemplate(
-                messages: messagesWithSystem(messages))
+            let promptTokens = try promptTokens(
+                messages: messagesWithSystem(messages),
+                mode: mode
+            )
             let decoded = tokenizer.decode(tokens: promptTokens, skipSpecialTokens: false)
 
             let video = input.videos[0]
