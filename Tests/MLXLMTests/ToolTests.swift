@@ -2,6 +2,18 @@ import Foundation
 import MLXLMCommon
 import Testing
 
+private struct CustomXMLToolCallFormatProvider: ToolCallFormatProvider {
+    let format = ToolCallFormat(rawValue: "custom_xml")
+
+    func createParser() -> any ToolCallParser {
+        XMLFunctionParser()
+    }
+
+    func matches(modelType: String) -> Bool {
+        modelType.hasPrefix("custom_xml_model")
+    }
+}
+
 struct ToolTests {
     @Test("Test Weather Tool Schema Generation")
     func testWeatherToolSchemaGeneration() throws {
@@ -267,6 +279,24 @@ struct ToolTests {
         #expect(toolCall.function.arguments.isEmpty)
     }
 
+    @Test("Test XML Function Format via ToolCallProcessor")
+    func testXMLFunctionFormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .xmlFunction)
+        let content = """
+            <tool_call>
+            <function=location_get_current>
+            </function>
+            </tool_call>
+            """
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "location_get_current")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
     @Test("Test XML Function Parser - Multiline Parameters")
     func testXMLFunctionParserMultilineParams() throws {
         let parser = XMLFunctionParser()
@@ -452,9 +482,41 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
 
+        // Qwen3.5 models
+        #expect(ToolCallFormat.infer(from: "qwen3_5") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .xmlFunction)
+        #expect(ToolCallFormat.infer(from: "qwen3_5_text") == .xmlFunction)
+
         // Unknown models should return nil (use default)
         #expect(ToolCallFormat.infer(from: "llama") == nil)
         #expect(ToolCallFormat.infer(from: "qwen2") == nil)
         #expect(ToolCallFormat.infer(from: "mistral") == nil)
+    }
+
+    @Test("Custom ToolCallFormat providers can be registered externally")
+    func testCustomToolCallFormatRegistration() throws {
+        let provider = CustomXMLToolCallFormatProvider()
+        ToolCallFormat.register(provider)
+
+        #expect(ToolCallFormat.infer(from: "custom_xml_model_v1") == provider.format)
+
+        let processor = ToolCallProcessor(format: provider.format)
+        let content = """
+            <tool_call>
+            <function=custom_lookup>
+            <parameter=query>
+            hello
+            </parameter>
+            </function>
+            </tool_call>
+            """
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "custom_lookup")
+        #expect(toolCall.function.arguments["query"] == .string("hello"))
     }
 }

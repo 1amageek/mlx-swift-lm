@@ -27,94 +27,227 @@ public protocol ToolCallParser: Sendable {
     func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall?
 }
 
-// MARK: - ToolCallFormat Enum
+// MARK: - ToolCallFormatProvider Protocol
 
-/// Supported tool call formats for different language models.
+/// Provider that describes how a model family emits tool calls.
 ///
-/// This enum defines the various tool call formats used by different LLM families.
-/// Each format has its own syntax for encoding function names and arguments.
+/// External packages can register custom providers instead of modifying MLXLMCommon.
+public protocol ToolCallFormatProvider: Sendable {
+    /// Stable serialization identifier for this format.
+    var format: ToolCallFormat { get }
+
+    /// Create a parser for the tool call format.
+    func createParser() -> any ToolCallParser
+
+    /// Returns true when this provider should be used for the given model type.
+    func matches(modelType: String) -> Bool
+}
+
+public extension ToolCallFormatProvider {
+    func matches(modelType _: String) -> Bool {
+        false
+    }
+}
+
+// MARK: - ToolCallFormat
+
+/// Stable serialization identifier for a tool call format.
 ///
-/// The raw string values can be used for JSON serialization or CLI parameters.
-///
-/// Reference: https://github.com/ml-explore/mlx-lm/tree/main/mlx_lm/tool_parsers
-public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
+/// Built-in formats are exposed as static values, but callers can define and
+/// register their own formats via ``ToolCallFormatProvider``.
+public struct ToolCallFormat: RawRepresentable, Hashable, Sendable, Codable, CaseIterable {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
     /// Default JSON format used by Llama, Qwen, and most models.
     /// Example: `<tool_call>{"name": "func", "arguments": {...}}</tool_call>`
-    case json
+    public static let json = Self(rawValue: "json")
 
     /// LFM2/LFM2.5 Pythonic format with model-specific tags.
     /// Example: `<|tool_call_start|>[func(arg='value')]<|tool_call_end|>`
-    case lfm2
+    public static let lfm2 = Self(rawValue: "lfm2")
 
-    /// XML function format used by Qwen3 Coder.
+    /// XML function format used by Qwen3.x families.
     /// Example: `<function=name><parameter=key>value</parameter></function>`
-    case xmlFunction = "xml_function"
+    public static let xmlFunction = Self(rawValue: "xml_function")
 
     /// GLM4 format with arg_key/arg_value tags.
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
-    case glm4
+    public static let glm4 = Self(rawValue: "glm4")
 
     /// Gemma function call format.
     /// Example: `call:name{key:value,k:<escape>str<escape>}`
-    case gemma
+    public static let gemma = Self(rawValue: "gemma")
 
     /// Kimi K2 format with functions prefix.
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
-    case kimiK2 = "kimi_k2"
+    public static let kimiK2 = Self(rawValue: "kimi_k2")
 
     /// MiniMax M2 format with invoke/parameter tags.
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
-    case minimaxM2 = "minimax_m2"
+    public static let minimaxM2 = Self(rawValue: "minimax_m2")
 
-    // MARK: - Factory Methods
+    public static var allCases: [ToolCallFormat] {
+        ToolCallFormatRegistry.shared.registeredFormats
+    }
 
-    /// Create the appropriate parser for this format.
-    /// - Returns: A parser instance configured for this format
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.init(rawValue: try container.decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    /// Create the registered parser for this format.
     public func createParser() -> any ToolCallParser {
-        switch self {
-        case .json:
-            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
-        case .lfm2:
-            return PythonicToolCallParser(
-                startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
-        case .xmlFunction:
-            return XMLFunctionParser()
-        case .glm4:
-            return GLM4ToolCallParser()
-        case .gemma:
-            return GemmaFunctionParser()
-        case .kimiK2:
-            return KimiK2ToolCallParser()
-        case .minimaxM2:
-            return MiniMaxM2ToolCallParser()
+        ToolCallFormatRegistry.shared.createParser(for: self)
+    }
+
+    /// Infer the tool call format from a model type.
+    public static func infer(from modelType: String) -> ToolCallFormat? {
+        ToolCallFormatRegistry.shared.infer(from: modelType)
+    }
+
+    /// Register a custom tool call provider.
+    ///
+    /// If another provider already exists for the same `format`, it will be replaced.
+    public static func register(_ provider: some ToolCallFormatProvider) {
+        ToolCallFormatRegistry.shared.register(provider)
+    }
+}
+
+// MARK: - Registry
+
+public final class ToolCallFormatRegistry: @unchecked Sendable {
+    public static let shared = ToolCallFormatRegistry()
+
+    private let lock = NSLock()
+    private var providersByFormat: [ToolCallFormat: any ToolCallFormatProvider] = [:]
+    private var formatOrder: [ToolCallFormat] = []
+    private var inferenceProviders: [any ToolCallFormatProvider] = []
+
+    public var registeredFormats: [ToolCallFormat] {
+        lock.withLock { formatOrder }
+    }
+
+    public func register(_ provider: some ToolCallFormatProvider) {
+        let erased: any ToolCallFormatProvider = provider
+        lock.withLock {
+            if providersByFormat[provider.format] == nil {
+                formatOrder.append(provider.format)
+            }
+            providersByFormat[provider.format] = erased
+            inferenceProviders.removeAll { $0.format == provider.format }
+            inferenceProviders.append(erased)
         }
     }
 
-    /// Infer the tool call format based on model type from config.json.
-    ///
-    /// This method maps known model types to their corresponding tool call formats,
-    /// enabling automatic format detection when loading models.
-    ///
-    /// - Parameter modelType: The `model_type` value from config.json
-    /// - Returns: The appropriate `ToolCallFormat`, or `nil` to use the default format
-    public static func infer(from modelType: String) -> ToolCallFormat? {
-        let type = modelType.lowercased()
-
-        // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
-        if type.hasPrefix("lfm2") {
-            return .lfm2
+    public func createParser(for format: ToolCallFormat) -> any ToolCallParser {
+        let provider = lock.withLock { providersByFormat[format] }
+        if let provider {
+            return provider.createParser()
         }
 
-        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
-        if type.hasPrefix("glm4") {
-            return .glm4
-        }
+        #if DEBUG
+        print("[MLXLMCommon] Unknown toolCallFormat=\(format.rawValue), falling back to json")
+        #endif
+        return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+    }
 
-        // Gemma
-        if type == "gemma" {
-            return .gemma
+    public func infer(from modelType: String) -> ToolCallFormat? {
+        let normalizedType = modelType.lowercased()
+        return lock.withLock {
+            inferenceProviders.first { $0.matches(modelType: normalizedType) }?.format
         }
+    }
 
-        return nil
+    private init() {
+        register(BuiltinJSONToolCallFormatProvider())
+        register(BuiltinLFM2ToolCallFormatProvider())
+        register(BuiltinXMLFunctionToolCallFormatProvider())
+        register(BuiltinGLM4ToolCallFormatProvider())
+        register(BuiltinGemmaToolCallFormatProvider())
+        register(BuiltinKimiK2ToolCallFormatProvider())
+        register(BuiltinMiniMaxM2ToolCallFormatProvider())
+    }
+}
+
+// MARK: - Built-in Providers
+
+private struct BuiltinJSONToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .json
+
+    func createParser() -> any ToolCallParser {
+        JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+    }
+}
+
+private struct BuiltinLFM2ToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .lfm2
+
+    func createParser() -> any ToolCallParser {
+        PythonicToolCallParser(startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+    }
+
+    func matches(modelType: String) -> Bool {
+        modelType.hasPrefix("lfm2")
+    }
+}
+
+private struct BuiltinXMLFunctionToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .xmlFunction
+
+    func createParser() -> any ToolCallParser {
+        XMLFunctionParser()
+    }
+
+    func matches(modelType: String) -> Bool {
+        modelType.hasPrefix("qwen3_5")
+    }
+}
+
+private struct BuiltinGLM4ToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .glm4
+
+    func createParser() -> any ToolCallParser {
+        GLM4ToolCallParser()
+    }
+
+    func matches(modelType: String) -> Bool {
+        modelType.hasPrefix("glm4")
+    }
+}
+
+private struct BuiltinGemmaToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .gemma
+
+    func createParser() -> any ToolCallParser {
+        GemmaFunctionParser()
+    }
+
+    func matches(modelType: String) -> Bool {
+        modelType == "gemma"
+    }
+}
+
+private struct BuiltinKimiK2ToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .kimiK2
+
+    func createParser() -> any ToolCallParser {
+        KimiK2ToolCallParser()
+    }
+}
+
+private struct BuiltinMiniMaxM2ToolCallFormatProvider: ToolCallFormatProvider {
+    let format: ToolCallFormat = .minimaxM2
+
+    func createParser() -> any ToolCallParser {
+        MiniMaxM2ToolCallParser()
     }
 }

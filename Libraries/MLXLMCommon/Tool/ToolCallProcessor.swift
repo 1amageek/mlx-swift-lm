@@ -26,6 +26,7 @@ public class ToolCallProcessor {
 
     // MARK: - Properties
 
+    private let format: ToolCallFormat
     private let parser: any ToolCallParser
     private let tools: [[String: any Sendable]]?
     private var state = State.normal
@@ -49,6 +50,7 @@ public class ToolCallProcessor {
     ///   - format: The tool call format to use (defaults to `.json` for standard JSON format)
     ///   - tools: Optional tool schemas for type-aware parsing
     public init(format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) {
+        self.format = format
         self.parser = format.createParser()
         self.tools = tools
     }
@@ -145,6 +147,12 @@ public class ToolCallProcessor {
                 // Parse the tool call using the parser
                 if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
                     toolCalls.append(toolCall)
+                } else {
+                    #if DEBUG
+                    print(
+                        "[MLXLMCommon] toolCallParseFailed format=\(format.rawValue) preview=\"\(preview(toolCallBuffer))\""
+                    )
+                    #endif
                 }
 
                 state = .normal
@@ -196,5 +204,16 @@ public class ToolCallProcessor {
         }
 
         return true
+    }
+
+    private func preview(_ text: String, limit: Int = 240) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        guard normalized.count > limit else {
+            return normalized
+        }
+        let endIndex = normalized.index(normalized.startIndex, offsetBy: limit)
+        return String(normalized[..<endIndex]) + "..."
     }
 }
