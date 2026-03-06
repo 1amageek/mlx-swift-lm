@@ -2,7 +2,7 @@
 //  GatedDelta.swift
 //  mlx-swift-lm
 //
-//  Port of https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
+//  Shared GatedDelta implementation used by Qwen3.5 text and conditional-generation models.
 //
 
 import Foundation
@@ -11,7 +11,7 @@ import MLXNN
 
 // MARK: - Compute G
 
-func computeGatedDeltaG(_ aLog: MLXArray, _ a: MLXArray, _ dtBias: MLXArray) -> MLXArray {
+package func computeGatedDeltaG(_ aLog: MLXArray, _ a: MLXArray, _ dtBias: MLXArray) -> MLXArray {
     let decay = exp(-exp(aLog.asType(.float32)) * softplus(a + dtBias))
     return decay.asType(a.dtype)
 }
@@ -76,7 +76,6 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
                   y[dv_idx] = static_cast<InT>(out);
                 }
               }
-              // Increment data pointers to next time step
               q_ += Hk * Dk;
               k_ += Hk * Dk;
               v_ += Hv * Dv;
@@ -105,11 +104,11 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
     )
 }
 
-private final class GatedDeltaKernelManager: Sendable {
-    static let shared = GatedDeltaKernelManager()
+package final class GatedDeltaKernelManager: Sendable {
+    package static let shared = GatedDeltaKernelManager()
 
-    let kernel: MLXFast.MLXFastKernel?
-    let kernelMasked: MLXFast.MLXFastKernel?
+    package let kernel: MLXFast.MLXFastKernel?
+    package let kernelMasked: MLXFast.MLXFastKernel?
 
     private init() {
         kernel = makeGatedDeltaKernel(hasMask: false)
@@ -119,7 +118,7 @@ private final class GatedDeltaKernelManager: Sendable {
 
 // MARK: - Kernel Dispatch
 
-func gatedDeltaKernel(
+package func gatedDeltaKernel(
     q: MLXArray,
     k: MLXArray,
     v: MLXArray,
@@ -211,7 +210,7 @@ private func gatedDeltaStepOps(
     return (y, state)
 }
 
-func gatedDeltaOps(
+private func gatedDeltaOps(
     q: MLXArray,
     k: MLXArray,
     v: MLXArray,
@@ -268,7 +267,7 @@ func gatedDeltaOps(
 
 // MARK: - Public API
 
-func gatedDeltaUpdate(
+package func gatedDeltaUpdate(
     q: MLXArray,
     k: MLXArray,
     v: MLXArray,

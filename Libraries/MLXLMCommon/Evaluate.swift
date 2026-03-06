@@ -84,6 +84,12 @@ public struct GenerateParameters: Sendable {
     /// number of tokens to consider for repetition penalty
     public var repetitionContextSize: Int
 
+    /// Number of already-prefilled prompt tokens represented by an external cache.
+    ///
+    /// When greater than zero, generation logic keeps the full prompt available to
+    /// logit processors while only forwarding the uncached suffix to `model.prepare`.
+    public var reusedPrefixTokenCount: Int
+
     public init(
         maxTokens: Int? = nil,
         maxKVSize: Int? = nil,
@@ -94,6 +100,7 @@ public struct GenerateParameters: Sendable {
         topP: Float = 1.0,
         repetitionPenalty: Float? = nil,
         repetitionContextSize: Int = 20,
+        reusedPrefixTokenCount: Int = 0,
         prefillStepSize: Int = 512
     ) {
         self.maxTokens = maxTokens
@@ -105,6 +112,7 @@ public struct GenerateParameters: Sendable {
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
+        self.reusedPrefixTokenCount = reusedPrefixTokenCount
         self.prefillStepSize = prefillStepSize
     }
 
@@ -278,6 +286,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 
     var tokenCount = 0
     let maxTokens: Int?
+    let reusedPrefixTokenCount: Int
 
     // Cache quantization parameters
     let kvBits: Int?
@@ -307,6 +316,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.reusedPrefixTokenCount = parameters.reusedPrefixTokenCount
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -340,6 +350,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = parameters.processor()
         self.sampler = parameters.sampler()
         self.maxTokens = parameters.maxTokens
+        self.reusedPrefixTokenCount = parameters.reusedPrefixTokenCount
 
         self.kvBits = parameters.kvBits
         self.kvGroupSize = parameters.kvGroupSize
@@ -372,6 +383,7 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
+        self.reusedPrefixTokenCount = 0
 
         // No cache quantization for this direct initialization
         self.kvBits = nil
@@ -386,7 +398,21 @@ public struct TokenIterator: Sequence, IteratorProtocol {
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
         processor?.prompt(input.text.tokens)
 
-        switch try model.prepare(input, cache: cache, windowSize: windowSize) {
+        let modelInput: LMInput
+        if reusedPrefixTokenCount > 0,
+           input.image == nil,
+           input.video == nil,
+           reusedPrefixTokenCount < input.text.tokens.size {
+            modelInput = LMInput(
+                text: input.text[text: reusedPrefixTokenCount...],
+                image: input.image,
+                video: input.video
+            )
+        } else {
+            modelInput = input
+        }
+
+        switch try model.prepare(modelInput, cache: cache, windowSize: windowSize) {
         case .tokens(let tokens):
             y = tokens
 
