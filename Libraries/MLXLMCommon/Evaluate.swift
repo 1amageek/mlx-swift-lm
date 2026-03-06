@@ -136,6 +136,79 @@ public struct GenerateParameters: Sendable {
     }
 }
 
+struct ReusedPrefixSlicePlan: Equatable {
+    let tokenSlice: ReusedPrefixSlice
+    let maskSlice: ReusedPrefixSlice?
+
+    static func make(for text: LMInput.Text, cachedTokenCount: Int) -> ReusedPrefixSlicePlan? {
+        make(
+            tokenShape: text.tokens.shape,
+            maskShape: text.mask?.shape,
+            cachedTokenCount: cachedTokenCount
+        )
+    }
+
+    static func make(
+        tokenShape: [Int],
+        maskShape: [Int]?,
+        cachedTokenCount: Int
+    ) -> ReusedPrefixSlicePlan? {
+        guard let tokenSlice = ReusedPrefixSlice.make(
+            for: tokenShape,
+            cachedTokenCount: cachedTokenCount
+        ) else {
+            return nil
+        }
+
+        if let maskShape {
+            guard let maskSlice = ReusedPrefixSlice.make(
+                for: maskShape,
+                cachedTokenCount: cachedTokenCount
+            ) else {
+                return nil
+            }
+            return ReusedPrefixSlicePlan(tokenSlice: tokenSlice, maskSlice: maskSlice)
+        }
+
+        return ReusedPrefixSlicePlan(tokenSlice: tokenSlice, maskSlice: nil)
+    }
+}
+
+enum ReusedPrefixSlice: Equatable {
+    case oneDimensional(start: Int)
+    case twoDimensionalTrailingAxis(start: Int)
+
+    static func make(for shape: [Int], cachedTokenCount: Int) -> ReusedPrefixSlice? {
+        guard cachedTokenCount > 0 else {
+            return nil
+        }
+
+        switch shape.count {
+        case 1:
+            guard cachedTokenCount < shape[0] else {
+                return nil
+            }
+            return .oneDimensional(start: cachedTokenCount)
+        case 2:
+            guard cachedTokenCount < shape[1] else {
+                return nil
+            }
+            return .twoDimensionalTrailingAxis(start: cachedTokenCount)
+        default:
+            return nil
+        }
+    }
+
+    func apply(to array: MLXArray) -> MLXArray {
+        switch self {
+        case .oneDimensional(let start):
+            return array[start...]
+        case .twoDimensionalTrailingAxis(let start):
+            return array[0..., start...]
+        }
+    }
+}
+
 /// Sampler that uses `argMax` (most likely) to sample the logits.
 public struct ArgMaxSampler: LogitSampler {
     public init() {}
@@ -402,9 +475,12 @@ public struct TokenIterator: Sequence, IteratorProtocol {
         if reusedPrefixTokenCount > 0,
            input.image == nil,
            input.video == nil,
-           reusedPrefixTokenCount < input.text.tokens.size {
+           let slicePlan = ReusedPrefixSlicePlan.make(
+               for: input.text,
+               cachedTokenCount: reusedPrefixTokenCount
+           ) {
             modelInput = LMInput(
-                text: input.text[text: reusedPrefixTokenCount...],
+                text: uncachedText(from: input.text, slicePlan: slicePlan),
                 image: input.image,
                 video: input.video
             )
@@ -427,6 +503,24 @@ public struct TokenIterator: Sequence, IteratorProtocol {
 
             break
         }
+    }
+
+    private func uncachedText(
+        from text: LMInput.Text,
+        slicePlan: ReusedPrefixSlicePlan
+    ) -> LMInput.Text {
+        let slicedMask = text.mask.map { mask in
+            if let maskSlice = slicePlan.maskSlice {
+                return maskSlice.apply(to: mask)
+            } else {
+                return mask
+            }
+        }
+
+        return .init(
+            tokens: slicePlan.tokenSlice.apply(to: text.tokens),
+            mask: slicedMask
+        )
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {
