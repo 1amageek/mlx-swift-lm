@@ -365,20 +365,50 @@ public class Gemma3ModelBackbone: Module {
 
     /// Processes input tokens through the model backbone.
     ///
-    /// - Parameter inputs: Array of token IDs of shape `[Batch, Length]`.
+    /// - Parameters:
+    ///   - inputs: Array of token IDs of shape `[Batch, Length]`.
+    ///   - attentionMask: Optional per-token mask of shape `[Batch, Length]` (1 for real tokens,
+    ///     0 for padding). When supplied the backbone runs with bidirectional attention across
+    ///     the full sequence — required for embedding inference. When `nil` the legacy
+    ///     causal/sliding mask is used (decoder-style).
     /// - Returns: Final hidden states of shape `[Batch, Length, HiddenSize]`.
-    public func callAsFunction(_ inputs: MLXArray) -> MLXArray {
+    public func callAsFunction(_ inputs: MLXArray, attentionMask: MLXArray? = nil) -> MLXArray {
         var h = embedTokens(inputs)
         let scale = MLXArray(sqrt(Float(config.hiddenSize)), dtype: .bfloat16)
         h = h * scale.asType(h.dtype)
 
-        let globalMask = createAttentionMask(h: h, cache: nil as KVCache?)
-        let slidingWindowMask =
-            if config.slidingWindowPattern > 1 {
-                createAttentionMask(h: h, cache: nil as KVCache?, windowSize: config.slidingWindow)
+        let globalMask: MLXFast.ScaledDotProductAttentionMaskMode
+        let slidingWindowMask: MLXFast.ScaledDotProductAttentionMaskMode
+        if let attentionMask {
+            // Embedding inference: every token attends to every other non-padding token.
+            // Sliding-window restriction is lifted so long inputs still form a single receptive
+            // field, matching the Python `mlx_embeddings` pipeline which passes the same mask
+            // to every layer regardless of global/sliding configuration.
+            let additive: MLXFast.ScaledDotProductAttentionMaskMode
+            if attentionMask.min().item(Float.self) >= 1 {
+                // No padding — all tokens valid, additive mask is all zeros ≡ no masking.
+                additive = .none
             } else {
-                MLXFast.ScaledDotProductAttentionMaskMode.none
+                let expanded = attentionMask.expandedDimensions(axes: [1, 2])
+                let mask = MLX.where(
+                    expanded .!= 0,
+                    MLXArray(Float(0)),
+                    MLXArray(-Float.infinity)
+                )
+                .asType(h.dtype)
+                additive = .array(mask)
             }
+            globalMask = additive
+            slidingWindowMask = additive
+        } else {
+            globalMask = createAttentionMask(h: h, cache: nil as KVCache?)
+            slidingWindowMask =
+                if config.slidingWindowPattern > 1 {
+                    createAttentionMask(h: h, cache: nil as KVCache?, windowSize: config.slidingWindow)
+                } else {
+                    MLXFast.ScaledDotProductAttentionMaskMode.none
+                }
+        }
 
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
@@ -433,10 +463,13 @@ public class EmbeddingGemma: Module, EmbeddingModel {
             inp = inp.reshaped(1, -1)
         }
 
-        let hiddenStates = backbone(inp)
+        // EmbeddingGemma runs the transformer with bidirectional attention. The same mask
+        // drives both the backbone self-attention and the mean-pool weighting so that
+        // padding tokens influence neither.
+        let notPadding = (attentionMask ?? (inp .!= 0))
+        let hiddenStates = backbone(inp, attentionMask: notPadding)
 
         // mean pooling: average all non-padding tokens
-        let notPadding = (attentionMask ?? (inp .!= 0))
         let sum = (hiddenStates * notPadding[.ellipsis, .newAxis]).sum(axis: 1)
         let nonMasked = notPadding.sum(axis: -1, keepDims: true)
         var out = sum / nonMasked
