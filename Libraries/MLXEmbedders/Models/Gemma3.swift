@@ -473,11 +473,14 @@ public class EmbeddingGemma: Module, EmbeddingModel {
         }
 
         // Initialize projection head if weights are present
-        if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) {
-            self._dense.wrappedValue = [
-                Linear(config.hiddenSize, config.intermediateSize, bias: false),
-                Linear(config.intermediateSize, config.hiddenSize, bias: false),
-            ]
+        if processedWeights.keys.contains(where: { $0.hasPrefix("dense.") }) && dense.isEmpty {
+            let projectionSize = processedWeights["dense.0.weight"]?.dim(0) ?? config.intermediateSize
+            self.update(
+                modules: ModuleChildren.unflattened([
+                    "dense.0": Linear(config.hiddenSize, projectionSize, bias: false),
+                    "dense.1": Linear(projectionSize, config.hiddenSize, bias: false),
+                ])
+            )
         }
 
         // Truncate vocab if weights were trained with extra padding tokens
